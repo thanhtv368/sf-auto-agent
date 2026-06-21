@@ -1,0 +1,25 @@
+{
+  "projectName": "MyProject",
+  "github": {
+    "repo": "org/repo",
+    "baseBranch": "main"
+  },
+  "salesforce": {
+    "objectType": "Case",
+    "recordKeyPrefix": "CASE",
+    "summaryField": "Subject",
+    "descriptionField": "Description",
+    "ownerField": "OwnerId",
+    "filterClause": "Status = 'In Progress' AND OwnerId = '{currentUserId}'",
+    "activeImplementedFilter": "Status != 'Closed' AND Status != 'In Review'"
+  },
+  "stack": {
+    "installCmd": "npm install",
+    "ciInstallCmd": "npm ci",
+    "lintCmd": "npm run lint",
+    "typeCheckCmd": "npm run type-check",
+    "buildCmd": "npm run build",
+    "devServerCmd": "npm run start",
+    "devServerUrl": "http://localhost:3000"
+  }
+}
