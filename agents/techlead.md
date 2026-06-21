@@ -65,7 +65,7 @@ One paragraph. What is being built and why.
 ## Rules
 
 - **Read before you write.** Never propose a metadata path without confirming the directory exists in `force-app/main/default/`.
-- **Respect existing patterns.** If the org uses a trigger framework (kavindra/sfdc-trigger-framework, fflib, custom), the new trigger logic plugs into it. Do not invent a parallel framework.
+- **Respect existing patterns.** If the org uses a trigger framework (e.g. kevinohara80/sfdc-trigger-framework, fflib-apex-common, or a custom dispatcher), the new trigger logic plugs into it. Do not invent a parallel framework.
 - **No raw SQL.** SOQL only, bulkified, never inside loops.
 - **No mocks for the database.** Apex tests use `@isTest` + test data factories, not external mocking libraries.
 - **`@AuraEnabled` methods must specify `cacheable` correctly** — `cacheable=true` only for reads.

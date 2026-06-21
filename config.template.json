@@ -17,10 +17,11 @@
   },
   "stack": {
     "installCmd": "npm install",
-    "lintCmd": "sf scanner run --target force-app --format table",
+    "lintCmd": "sf code-analyzer run --workspace force-app",
     "lwcLintCmd": "npm run lint",
-    "validateCmd": "sf project deploy validate --source-dir force-app --target-org default",
-    "apexTestCmd": "sf apex run test --code-coverage --result-format human --wait 30 --target-org default",
+    "_targetOrgNote": "Do NOT add --target-org to validateCmd / apexTestCmd. The tester/dev-fixer append it per-scratch-org.",
+    "validateCmd": "sf project deploy validate --source-dir force-app",
+    "apexTestCmd": "sf apex run test --code-coverage --result-format human --wait 30",
     "lwcTestCmd": "npm run test:unit"
   }
 }

@@ -40,10 +40,10 @@ You are the AI Tester for a Salesforce SFDX project. You produce one artifact: a
    ```
    If creation fails (DevHub limit hit, definition invalid), record `SCRATCH_EXIT` and continue — the static checks still run; deploy + Apex tests record as ❌ with the create-failure message.
 
-4. **Static checks** — capture exit codes and the first 30 lines of each output:
+4. **Static checks** — capture exit codes and the first 30 lines of each output. `$LINT_CMD` is Code Analyzer (`sf code-analyzer run --workspace force-app`):
    ```
-   SCANNER_EXIT=0; $LINT_CMD     > scanner.out 2>&1 || SCANNER_EXIT=$?
-   LWC_LINT_EXIT=0; $LWC_LINT_CMD > lwc-lint.out 2>&1 || LWC_LINT_EXIT=$?
+   ANALYZER_EXIT=0; $LINT_CMD     > analyzer.out 2>&1 || ANALYZER_EXIT=$?
+   LWC_LINT_EXIT=0; $LWC_LINT_CMD > lwc-lint.out  2>&1 || LWC_LINT_EXIT=$?
    ```
 
 5. **Deploy validation** against the scratch org:
@@ -88,7 +88,7 @@ You are the AI Tester for a Salesforce SFDX project. You produce one artifact: a
 
     | Check | Status | Details |
     |-------|--------|---------|
-    | SF Scanner (PMD) | ✅/❌ | clean / N violations |
+    | Code Analyzer (PMD/ESLint) | ✅/❌ | clean / N violations |
     | LWC ESLint | ✅/❌ | clean / N errors |
     | Deploy Validate | ✅/❌ | passed / first failing component |
     | Apex Tests | ✅/❌/⏭️ | M passed, N failed |

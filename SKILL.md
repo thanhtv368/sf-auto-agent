@@ -36,10 +36,12 @@ BASE_BRANCH=$(jq -r '.github.baseBranch // "main"'   "$CFG")
 
 # Salesforce dev commands
 INSTALL_CMD=$(jq -r   '.stack.installCmd    // "npm install"'                                   "$CFG")
-LINT_CMD=$(jq -r      '.stack.lintCmd       // "sf scanner run --target force-app --format table"' "$CFG")
+LINT_CMD=$(jq -r      '.stack.lintCmd       // "sf code-analyzer run --workspace force-app"'    "$CFG")
 LWC_LINT_CMD=$(jq -r  '.stack.lwcLintCmd    // "npm run lint"'                                  "$CFG")
-VALIDATE_CMD=$(jq -r  '.stack.validateCmd   // "sf project deploy validate --source-dir force-app --target-org default"' "$CFG")
-APEX_TEST_CMD=$(jq -r '.stack.apexTestCmd   // "sf apex run test --code-coverage --result-format human --wait 30 --target-org default"' "$CFG")
+# IMPORTANT: validateCmd and apexTestCmd MUST NOT include --target-org. The tester
+# and dev-fixer append it per-scratch-org. Including it here causes a duplicate flag.
+VALIDATE_CMD=$(jq -r  '.stack.validateCmd   // "sf project deploy validate --source-dir force-app"' "$CFG")
+APEX_TEST_CMD=$(jq -r '.stack.apexTestCmd   // "sf apex run test --code-coverage --result-format human --wait 30"' "$CFG")
 LWC_TEST_CMD=$(jq -r  '.stack.lwcTestCmd    // "npm run test:unit"'                             "$CFG")
 SCRATCH_DEF=$(jq -r   '.salesforce.scratchOrgDefinition // "config/project-scratch-def.json"'   "$CFG")
 DEVHUB_ALIAS=$(jq -r  '.salesforce.devhubAlias // "DevHub"'                                     "$CFG")
@@ -172,13 +174,20 @@ $PLAN
 5. Agent (backend)  → Apex classes, triggers, Flows
 6. Agent (frontend) → LWC / Aura
 7. Push to scratch: sf project deploy start --source-dir force-app --target-org \$BRANCH-scratch
-8. Agent (tester) → Apex tests + Jest + scratch-org validate. Max 2 retry cycles.
+8. In-loop validation (raw commands, NO tester agent yet — the PR doesn't exist):
+   - sf code-analyzer run --workspace force-app
+   - npm run lint  (if package.json has it)
+   - sf project deploy validate --source-dir force-app --target-org \$BRANCH-scratch
+   - sf apex run test --code-coverage --result-format human --wait 30 --target-org \$BRANCH-scratch
+   - npm run test:unit  (if configured)
+   If any critical step fails, re-invoke Agent (backend) or Agent (frontend) with the failure output. Max 2 retry cycles, then ERROR and STOP.
 9. git add -A && git commit -m '$KEY: $SUMMARY'
 10. git push -u origin \$BRANCH
-11. gh pr create --repo $GITHUB_REPO --title '$KEY: $SUMMARY' --body '$PLAN' — capture PR number
-12. sf org delete scratch --target-org \$BRANCH-scratch --no-prompt
-13. cd $PROJECT_ROOT && git worktree remove .claude/worktrees/\$BRANCH
-14. Print: DONE: PR created for $KEY
+11. gh pr create --repo $GITHUB_REPO --title '$KEY: $SUMMARY' --body '$PLAN' — capture PR_NUMBER from output.
+12. Agent (tester) — pass it PR_NUMBER. It posts the SHA-pinned ## 🧪 Test Report PR comment.
+13. sf org delete scratch --target-org \$BRANCH-scratch --no-prompt
+14. cd $PROJECT_ROOT && git worktree remove .claude/worktrees/\$BRANCH
+15. Print: DONE: PR created for $KEY
 On any failure print ERROR and STOP (leave the worktree + scratch org for forensics)." \
   2>&1 | tee "$LOG" &
 ```

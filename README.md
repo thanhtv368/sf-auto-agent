@@ -42,7 +42,7 @@ Labels are the source of truth — every state transition adds/removes one.
 
 Optional but recommended:
 
-- `@salesforce/sfdx-scanner` installed as a plugin (`sf plugins install @salesforce/sfdx-scanner`) for Apex/Aura/LWC linting.
+- Salesforce Code Analyzer installed as a plugin (`sf plugins install @salesforce/plugin-code-analyzer`) for Apex/Aura/LWC linting via `sf code-analyzer run`. (The older `@salesforce/sfdx-scanner` / `sf scanner run` is deprecated.)
 - `sfdx-lwc-jest` configured in `package.json` for LWC unit tests.
 - **[`forcedotcom/sf-skills`](https://github.com/forcedotcom/sf-skills)** — Salesforce's official curated collection of agent skills. Each of our seven agents will invoke them by name (e.g. `generating-apex`, `generating-lwc-components`, `applying-slds`, `debugging-apex-logs`) when relevant and gracefully degrade if a skill isn't installed. Strongly recommended — install once:
 
@@ -217,13 +217,11 @@ A working example:
 | `salesforce.scratchOrgDefinition` | Path to the scratch-org JSON. Default `config/project-scratch-def.json`. |
 | `salesforce.apexCoverageThreshold` | Minimum overall coverage (%). The tester treats lower coverage as a failure. |
 | `salesforce.sourceDir` | The SFDX source root. Default `force-app`. |
-| `stack.lintCmd` | PMD/SF Scanner. Empty string disables. |
+| `stack.lintCmd` | Code Analyzer (`sf code-analyzer run`). Empty string disables. |
 | `stack.lwcLintCmd` | Project's `package.json` lint script. |
-| `stack.validateCmd` | `sf project deploy validate` — adds `--target-org <scratch>` automatically. |
-| `stack.apexTestCmd` | `sf apex run test` — adds `--target-org <scratch>` automatically. |
+| `stack.validateCmd` | `sf project deploy validate` — tester appends `--target-org <scratch>` automatically. Do NOT include it in the config. |
+| `stack.apexTestCmd` | `sf apex run test` — tester appends `--target-org <scratch>` automatically. Do NOT include it in the config. |
 | `stack.lwcTestCmd` | `sfdx-lwc-jest` runner. |
-
-The tester will append `--target-org <branch-scratch>` to `validateCmd` and `apexTestCmd` — don't include it in the config.
 
 ---
 
@@ -241,7 +239,7 @@ Inside the Claude session:
 
 What "good" looks like on first run:
 
-- A JQL probe and SOQL-free Jira fetch logs successfully.
+- A JQL search executes without errors.
 - If you have 0 matching tickets: `No actionable tickets` and the run ends.
 - If you have one: the agent explores `force-app/`, decides if questions or a plan are warranted, posts a Jira comment, and adds a label.
 
