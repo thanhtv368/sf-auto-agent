@@ -1,25 +1,26 @@
 {
-  "projectName": "MyProject",
+  "projectName": "MySalesforceApp",
   "github": {
     "repo": "org/repo",
     "baseBranch": "main"
   },
+  "jira": {
+    "projectKey": "MYAPP",
+    "jqlFilter": "project=MYAPP AND status=\"In Progress\" AND assignee=currentUser()",
+    "activeImplementedJql": "project=MYAPP AND labels=\"ai-implemented\" AND status NOT IN (\"Done\", \"In Review\")"
+  },
   "salesforce": {
-    "objectType": "Case",
-    "recordKeyPrefix": "CASE",
-    "summaryField": "Subject",
-    "descriptionField": "Description",
-    "ownerField": "OwnerId",
-    "filterClause": "Status = 'In Progress' AND OwnerId = '{currentUserId}'",
-    "activeImplementedFilter": "Status != 'Closed' AND Status != 'In Review'"
+    "devhubAlias": "DevHub",
+    "scratchOrgDefinition": "config/project-scratch-def.json",
+    "apexCoverageThreshold": 75,
+    "sourceDir": "force-app"
   },
   "stack": {
     "installCmd": "npm install",
-    "ciInstallCmd": "npm ci",
-    "lintCmd": "npm run lint",
-    "typeCheckCmd": "npm run type-check",
-    "buildCmd": "npm run build",
-    "devServerCmd": "npm run start",
-    "devServerUrl": "http://localhost:3000"
+    "lintCmd": "sf scanner run --target force-app --format table",
+    "lwcLintCmd": "npm run lint",
+    "validateCmd": "sf project deploy validate --source-dir force-app --target-org default",
+    "apexTestCmd": "sf apex run test --code-coverage --result-format human --wait 30 --target-org default",
+    "lwcTestCmd": "npm run test:unit"
   }
 }

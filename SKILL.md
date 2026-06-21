@@ -1,546 +1,257 @@
 ---
 name: sf-auto-agent
-description: AI Auto Agent (Salesforce edition) — processes In-Progress Salesforce work records, asks questions, posts plans, and spawns parallel implementation sessions for approved records. Project-agnostic — reads per-project config from .claude/sf-auto-agent.config.json in the working directory.
+description: AI Auto Agent for Salesforce app development — processes In-Progress Jira tickets, asks questions, posts plans, and spawns parallel implementation sessions that build Apex/LWC/metadata, validate against a scratch org, run Apex + Jest tests, and open PRs. Project-agnostic — reads per-project config from .claude/sf-auto-agent.config.json in the working directory.
 ---
 
-You are the **AI Auto Agent orchestrator (Salesforce edition)**.
+You are the **AI Auto Agent orchestrator for Salesforce app development**.
 
-This skill is project-agnostic. It is configured at two levels:
+**Task tracking lives in Jira.** **Code lives in an SFDX project on GitHub.** The orchestrator walks Jira tickets through a state machine driven by labels, and spawns background Claude sessions that execute the Salesforce-specific implementation + test pipeline.
 
-1. **Global credentials** at `~/.claude/sf-auto-agent.env` (Salesforce OAuth + GitHub repo defaults).
-2. **Per-project config** at `<PROJECT_ROOT>/.claude/sf-auto-agent.config.json` (which Salesforce object to scan, field names, build commands, GitHub repo, etc.).
+This skill is project-agnostic. Two config layers:
 
-Run from the target project's directory — the skill reads `./.claude/sf-auto-agent.config.json` to learn the project.
+1. **Global credentials** at `~/.claude/sf-auto-agent.env` — Jira API token + Salesforce DevHub login.
+2. **Per-project config** at `<PROJECT_ROOT>/.claude/sf-auto-agent.config.json` — Jira project key, SFDX commands, GitHub repo.
+
+Run from the target project's directory.
 
 ---
 
 ## Setup — MUST DO FIRST
 
 ```bash
-# 1. Load global Salesforce credentials.
 if [ ! -f "$HOME/.claude/sf-auto-agent.env" ]; then
-  echo "ERROR: ~/.claude/sf-auto-agent.env missing. See 'Bootstrap' section." >&2
-  exit 1
+  echo "ERROR: ~/.claude/sf-auto-agent.env missing. See README." >&2; exit 1
 fi
 source "$HOME/.claude/sf-auto-agent.env"
 
-# 2. Load per-project config (must run from project root, or pass PROJECT_ROOT).
 export PROJECT_ROOT="${PROJECT_ROOT:-$PWD}"
 CFG="$PROJECT_ROOT/.claude/sf-auto-agent.config.json"
-if [ ! -f "$CFG" ]; then
-  echo "ERROR: $CFG missing. See 'Bootstrap' section." >&2
-  exit 1
-fi
+[ -f "$CFG" ] || { echo "ERROR: $CFG missing." >&2; exit 1; }
 
-# Extract config values (jq required).
-SF_OBJECT=$(jq -r '.salesforce.objectType'        "$CFG")
-SF_PREFIX=$(jq -r '.salesforce.recordKeyPrefix'   "$CFG")   # e.g. "WI" → WI-123 in branch names
-SF_SUMMARY_FIELD=$(jq -r '.salesforce.summaryField'     "$CFG")
-SF_DESC_FIELD=$(jq -r '.salesforce.descriptionField'    "$CFG")
-SF_OWNER_FIELD=$(jq -r '.salesforce.ownerField // "OwnerId"' "$CFG")
-SF_FILTER=$(jq -r '.salesforce.filterClause'  "$CFG")       # SOQL WHERE clause (no leading WHERE)
-GITHUB_REPO=$(jq -r '.github.repo'            "$CFG")
-LINT_CMD=$(jq -r '.stack.lintCmd      // "npm run lint"'        "$CFG")
-TC_CMD=$(jq -r   '.stack.typeCheckCmd // "npm run type-check"'  "$CFG")
-BUILD_CMD=$(jq -r '.stack.buildCmd    // "npm run build"'       "$CFG")
-INSTALL_CMD=$(jq -r '.stack.installCmd   // "npm install"'      "$CFG")
-CI_INSTALL_CMD=$(jq -r '.stack.ciInstallCmd // "npm ci"'        "$CFG")
+PROJECT_NAME=$(jq -r '.projectName'                  "$CFG")
+JIRA_PROJECT=$(jq -r '.jira.projectKey'              "$CFG")
+JIRA_JQL=$(jq -r '.jira.jqlFilter // ("project=" + .jira.projectKey + " AND status=\"In Progress\" AND assignee=currentUser()")' "$CFG")
+GITHUB_REPO=$(jq -r '.github.repo'                   "$CFG")
+BASE_BRANCH=$(jq -r '.github.baseBranch // "main"'   "$CFG")
 
-# 3. Ensure log directory.
+# Salesforce dev commands
+INSTALL_CMD=$(jq -r   '.stack.installCmd    // "npm install"'                                   "$CFG")
+LINT_CMD=$(jq -r      '.stack.lintCmd       // "sf scanner run --target force-app --format table"' "$CFG")
+LWC_LINT_CMD=$(jq -r  '.stack.lwcLintCmd    // "npm run lint"'                                  "$CFG")
+VALIDATE_CMD=$(jq -r  '.stack.validateCmd   // "sf project deploy validate --source-dir force-app --target-org default"' "$CFG")
+APEX_TEST_CMD=$(jq -r '.stack.apexTestCmd   // "sf apex run test --code-coverage --result-format human --wait 30 --target-org default"' "$CFG")
+LWC_TEST_CMD=$(jq -r  '.stack.lwcTestCmd    // "npm run test:unit"'                             "$CFG")
+SCRATCH_DEF=$(jq -r   '.salesforce.scratchOrgDefinition // "config/project-scratch-def.json"'   "$CFG")
+DEVHUB_ALIAS=$(jq -r  '.salesforce.devhubAlias // "DevHub"'                                     "$CFG")
+COVERAGE_MIN=$(jq -r  '.salesforce.apexCoverageThreshold // 75'                                 "$CFG")
+
 mkdir -p "$PROJECT_ROOT/.claude/sf-auto-agent-logs"
 LOG_DIR="$PROJECT_ROOT/.claude/sf-auto-agent-logs"
 ```
 
-### Bootstrap (first-time install per machine / per project)
-
-**Global creds** — create `~/.claude/sf-auto-agent.env`:
-```
-SF_LOGIN_URL=https://login.salesforce.com           # or test.salesforce.com for sandbox
-SF_CLIENT_ID=<connected-app-consumer-key>
-SF_CLIENT_SECRET=<connected-app-consumer-secret>
-SF_USERNAME=user@example.com
-SF_PASSWORD=<password><security-token>              # concat security token at the end
-DEFAULT_GITHUB_REPO=org/repo                        # optional fallback
-```
-Chmod 600 it.
-
-**Per-project config** — in the project directory, create `.claude/sf-auto-agent.config.json`:
-```json
-{
-  "projectName": "MyProject",
-  "github": { "repo": "org/repo", "baseBranch": "main" },
-  "salesforce": {
-    "objectType": "Case",
-    "recordKeyPrefix": "CASE",
-    "summaryField": "Subject",
-    "descriptionField": "Description",
-    "ownerField": "OwnerId",
-    "filterClause": "Status = 'In Progress' AND OwnerId = '{currentUserId}'"
-  },
-  "stack": {
-    "installCmd": "npm install",
-    "ciInstallCmd": "npm ci",
-    "lintCmd": "npm run lint",
-    "typeCheckCmd": "npm run type-check",
-    "buildCmd": "npm run build",
-    "devServerCmd": "npm run start",
-    "devServerUrl": "http://localhost:3000"
-  }
-}
-```
-
-The string `{currentUserId}` in `filterClause` is substituted at runtime.
-
 ---
 
-## Salesforce REST helpers
+## Jira REST helpers
 
-All Salesforce calls go through these helpers. **Always source the env first** (Setup step 1).
-
-### Auth — get access token + instance URL
+All Jira calls use Basic Auth with the email + API token:
 
 ```bash
-sf_auth() {
-  local resp
-  resp=$(curl -s -X POST "$SF_LOGIN_URL/services/oauth2/token" \
-    -d "grant_type=password" \
-    -d "client_id=$SF_CLIENT_ID" \
-    -d "client_secret=$SF_CLIENT_SECRET" \
-    -d "username=$SF_USERNAME" \
-    --data-urlencode "password=$SF_PASSWORD")
-  SF_TOKEN=$(echo "$resp" | jq -r '.access_token // empty')
-  SF_INSTANCE=$(echo "$resp" | jq -r '.instance_url // empty')
-  SF_USER_ID=$(echo "$resp" | jq -r '.id // empty' | awk -F/ '{print $NF}')
-  if [ -z "$SF_TOKEN" ]; then
-    echo "ERROR: Salesforce auth failed: $resp" >&2
-    return 1
-  fi
-}
-sf_auth || exit 1
-
-API="${SF_INSTANCE}/services/data/v60.0"
-AUTH_HDR="Authorization: Bearer $SF_TOKEN"
+jira_curl() { curl -s -u "$JIRA_EMAIL:$JIRA_API_TOKEN" -H "Content-Type: application/json" "$@"; }
 ```
 
-**Validation:** if `access_token` is missing, abort the run. Do NOT silently proceed.
+### Search (JQL — use the new POST endpoint)
 
-### Query records (SOQL)
+Atlassian removed the legacy `GET /rest/api/3/search` in 2025. Use `POST /rest/api/3/search/jql`. The new response has **no `total`** field — detect "no results" by `len(issues) == 0`, never `total == 0`.
 
 ```bash
-# URL-encode the SOQL string.
-sf_query() {
-  local soql="$1"
-  local enc
-  enc=$(jq -rn --arg q "$soql" '$q|@uri')
-  curl -s -H "$AUTH_HDR" "$API/query?q=$enc"
-}
-```
-
-Build the filter by substituting `{currentUserId}`:
-```bash
-FILTER="${SF_FILTER//\{currentUserId\}/$SF_USER_ID}"
-SOQL="SELECT Id, Name, $SF_SUMMARY_FIELD, $SF_DESC_FIELD, $SF_OWNER_FIELD, (SELECT Id, Body, CreatedById, CreatedDate FROM Feeds) FROM $SF_OBJECT WHERE $FILTER"
-RESP=$(sf_query "$SOQL")
-```
-
-**Always validate** the response: if it contains `errorCode`, log and abort.
-```bash
-if echo "$RESP" | jq -e '.[0].errorCode? // .errorCode? // empty' > /dev/null; then
-  echo "ERROR: SOQL failed: $RESP" >&2; exit 1
+RESP=$(jira_curl -X POST "$JIRA_BASE_URL/rest/api/3/search/jql" \
+  -d "$(jq -n --arg jql "$JIRA_JQL" '{jql:$jql, fields:["summary","description","status","priority","comment","labels"], maxResults:50}')")
+if echo "$RESP" | jq -e '.errorMessages? // empty | length > 0' >/dev/null; then
+  echo "ERROR: JQL failed: $(echo "$RESP" | jq -c .errorMessages)" >&2; exit 1
 fi
-RECORDS=$(echo "$RESP" | jq -c '.records // []')
-COUNT=$(echo "$RECORDS" | jq 'length')
 ```
 
-### Get single record (with Chatter feed)
+### Other endpoints
 
-```bash
-sf_get() {  # $1 = record Id
-  curl -s -H "$AUTH_HDR" "$API/sobjects/$SF_OBJECT/$1"
-}
-sf_feed() { # $1 = record Id — fetches Chatter feed (comment thread)
-  curl -s -H "$AUTH_HDR" "$API/chatter/feeds/record/$1/feed-elements?sort=CreatedDateAsc"
-}
-```
-
-### Post a Chatter comment (state markers + plans + questions)
-
-```bash
-sf_post_chatter() {  # $1 = record Id, $2 = body text
-  local body
-  body=$(jq -n --arg pid "$1" --arg msg "$2" '{
-    body: { messageSegments: [ { type: "Text", text: $msg } ] },
-    feedElementType: "FeedItem",
-    subjectId: $pid
-  }')
-  curl -s -H "$AUTH_HDR" -H "Content-Type: application/json" \
-    -X POST "$API/chatter/feed-elements" -d "$body"
-}
-```
-
-For richer formatting (headings/lists), build a longer `messageSegments` array with `MarkupBegin`/`MarkupEnd` segments. See the "Questions formatting" section below.
-
-### Add/remove a Topic (the Salesforce equivalent of a Jira label)
-
-Salesforce **Topics** are tag-like and assigned via `TopicAssignment`. Topics are created on-the-fly if they don't exist.
-
-```bash
-sf_add_topic() {    # $1 = record Id, $2 = topic name (e.g. "ai-implemented")
-  local body
-  body=$(jq -n --arg eid "$1" --arg name "$2" '{ entityId: $eid, topicName: $name }')
-  curl -s -H "$AUTH_HDR" -H "Content-Type: application/json" \
-    -X POST "$API/connect/topics/topic-assignments" -d "$body"
-}
-
-sf_remove_topic() {  # $1 = record Id, $2 = topic name
-  # Find the assignment id for this entity+topic, then DELETE it.
-  local topic_id
-  topic_id=$(curl -s -H "$AUTH_HDR" \
-    "$API/query?q=$(jq -rn --arg n "$2" '"SELECT Id FROM Topic WHERE Name='\''" + $n + "'\''"|@uri')" \
-    | jq -r '.records[0].Id // empty')
-  [ -z "$topic_id" ] && return 0
-  local assign_id
-  assign_id=$(curl -s -H "$AUTH_HDR" \
-    "$API/query?q=$(jq -rn --arg e "$1" --arg t "$topic_id" '"SELECT Id FROM TopicAssignment WHERE EntityId='\''" + $e + "'\'' AND TopicId='\''" + $t + "'\''"|@uri')" \
-    | jq -r '.records[0].Id // empty')
-  [ -z "$assign_id" ] && return 0
-  curl -s -H "$AUTH_HDR" -X DELETE "$API/sobjects/TopicAssignment/$assign_id"
-}
-
-sf_get_topics() {   # $1 = record Id — prints topic names, one per line
-  curl -s -H "$AUTH_HDR" \
-    "$API/query?q=$(jq -rn --arg e "$1" '"SELECT Topic.Name FROM TopicAssignment WHERE EntityId='\''" + $e + "'\''"|@uri')" \
-    | jq -r '.records[].Topic.Name'
-}
-```
-
-### Update record status
-
-```bash
-sf_update() {  # $1 = record Id, $2 = JSON body, e.g. '{"Status":"In Review"}'
-  curl -s -H "$AUTH_HDR" -H "Content-Type: application/json" \
-    -X PATCH "$API/sobjects/$SF_OBJECT/$1" -d "$2"
-}
-```
+- `GET  /rest/api/3/issue/{KEY}?fields=summary,description,status,priority,comment,labels` — single issue.
+- `POST /rest/api/3/issue/{KEY}/comment` — body is ADF (see "Questions formatting").
+- `PUT  /rest/api/3/issue/{KEY}` with `{"update":{"labels":[{"add":"NAME"}]}}` / `{"remove":"NAME"}` — manage labels.
+- `GET  /rest/api/3/issue/{KEY}/transitions` then `POST .../transitions` — change status.
 
 ---
 
 ## What you do
 
-Every scheduled run (or when invoked manually), process all records returned by the configured SOQL filter. Each record progresses through a state machine driven primarily by **Topics**, with **Chatter feed markers** as fallback.
+Every scheduled run, process every Jira ticket returned by the configured JQL. Each ticket progresses through a state machine driven by labels (primary) and `[AI-AUTO-AGENT:STATE]` comment markers (fallback).
 
-A record's display key is its `Name` field (e.g. `00001234` for Case, or `WI-123` for a custom object with auto-number prefix). Branch names use a lowercase, hyphen-safe slug: `BRANCH=$(echo "$NAME" | tr '[:upper:] ' '[:lower:]-' | tr -cd 'a-z0-9-')`.
-
----
-
-## Step 1 — Fetch records
-
-Build the SOQL using the configured fields + filter (see Setup). After querying:
-
-- If the response contains `errorCode`, log and abort. **Do not** proceed with a degraded response.
-- If `RECORDS` is `[]`, log "No actionable records" and **skip Steps 2–3**, but **still run Step 4** (test sweep).
+Branch slugs derive from the ticket key: `BRANCH=$(echo "$KEY" | tr '[:upper:]' '[:lower:]')`.
 
 ---
 
-## Step 2 — For each record, determine state
+## Step 1 — Fetch tickets
 
-State is determined **primarily by Topics**, with Chatter markers as fallback.
+Run the JQL above. If `errorMessages`/`warningMessages`, log and abort. If `issues == []`, log "No actionable tickets", **skip Steps 2–3 but still run Step 4**.
 
-### Topic-based state detection (PRIMARY)
+## Step 2 — Determine state per ticket
 
-| Topic                | State          | Meaning                                |
-|----------------------|----------------|----------------------------------------|
-| `ai-implemented`     | COMPLETED      | PR created — **skip entirely**         |
-| `ai-in-progress`     | IN_PROGRESS    | Implementation session running         |
-| `ai-plan-posted`     | PLAN_POSTED    | Plan posted, waiting for human approval|
-| `ai-questions`       | QUESTIONS_ASKED| Questions posted, waiting for reply    |
-| `ai-needs-human`     | BLOCKED        | Fix cap hit — skip, human required     |
-| (none of the above)  | NEW            | No AI processing yet                   |
+| Label | State | Meaning |
+|-------|-------|---------|
+| `ai-implemented` | COMPLETED | PR open — skip |
+| `ai-in-progress` | IN_PROGRESS | Implementation session running |
+| `ai-plan-posted` | PLAN_POSTED | Plan posted, awaiting human approval |
+| `ai-questions` | QUESTIONS_ASKED | Questions posted, awaiting human reply |
+| `ai-needs-human` | BLOCKED | Fix cap hit |
+| (none) | NEW | No AI processing yet |
 
-**Priority:** if multiple `ai-*` topics exist, use the one highest in the table.
+Priority top-to-bottom; pick the highest if multiple.
 
-### Marker-based fallback
+**Fallback**: if no `ai-*` label, scan comments for `[AI-AUTO-AGENT:STATE]` and sync the label immediately.
 
-If no `ai-*` topic is present, scan the Chatter feed for the most recent post containing `[AI-AUTO-AGENT:STATE]` markers (`QUESTIONS`, `PLAN`, `IN_PROGRESS`, `IMPLEMENTED`, `ERROR`, `FIX-APPLIED`, `FIX-GIVE-UP`). On match, **immediately add the matching topic** to sync state.
+**REPLIES_RECEIVED**: `ai-questions` label + human comment after the last `[AI-AUTO-AGENT:QUESTIONS]` → ready to plan.
 
-### Special case — REPLIES_RECEIVED
-
-If a record has the `ai-questions` topic AND a human (not the orchestrator's `SF_USER_ID`, and body does NOT contain `[AI-AUTO-AGENT:`) has posted to the Chatter feed **after** the last `[AI-AUTO-AGENT:QUESTIONS]` post, treat it as **REPLIES_RECEIVED** — ready for plan creation.
-
-Likewise for **PLAN_POSTED → APPROVED**: a human reply containing any of `approved`, `lgtm`, `go ahead`, `ship it`, `proceed` (case-insensitive) after the latest `[AI-AUTO-AGENT:PLAN]` post.
+**APPROVED**: `ai-plan-posted` label + human comment after the last `[AI-AUTO-AGENT:PLAN]` containing any of `approved`, `lgtm`, `go ahead`, `ship it`, `proceed` (case-insensitive) → ready to implement.
 
 ---
 
-## Step 3 — Execute action per state
+## Step 3 — Act on state
 
 ### NEW
-
-1. Read `$SF_DESC_FIELD` from the record.
-2. Use Glob/Grep/Read to explore relevant source code under `$PROJECT_ROOT`.
-3. Assess clarity:
-   - **Ambiguous** → post `[AI-AUTO-AGENT:QUESTIONS]` Chatter comment with a numbered list of questions; add topic `ai-questions`.
-   - **Clear** → spawn a `techlead` Agent to produce a task breakdown; post `[AI-AUTO-AGENT:PLAN]` comment; add topic `ai-plan-posted`. **Stop**. Wait for approval on the next run.
-
-#### Questions formatting (Chatter)
-
-Chatter rich text uses `MarkupBegin`/`MarkupEnd` segments. Build with jq:
-```bash
-build_questions_body() {
-  local marker="[AI-AUTO-AGENT:QUESTIONS]"
-  local q_json="$1"  # JSON array of question strings
-  jq -n --arg marker "$marker" --argjson qs "$q_json" '
-    {
-      body: {
-        messageSegments: (
-          [{type:"Text",text:$marker}]
-          + [{type:"MarkupBegin",markupType:"Paragraph"},{type:"Text",text:"Questions from AI Auto Agent:"},{type:"MarkupEnd",markupType:"Paragraph"}]
-          + [{type:"MarkupBegin",markupType:"OrderedList"}]
-          + ($qs | map([
-              {type:"MarkupBegin",markupType:"ListItem"},
-              {type:"Text",text:.},
-              {type:"MarkupEnd",markupType:"ListItem"}
-            ]) | add)
-          + [{type:"MarkupEnd",markupType:"OrderedList"}]
-          + [{type:"Text",text:"Please reply on this record. I will process your answers on the next run."}]
-        )
-      },
-      feedElementType: "FeedItem"
-    }'
-}
-```
+1. Read `fields.description`.
+2. Explore the SFDX project with Glob/Grep/Read — `force-app/main/default/{classes,lwc,aura,objects,permissionsets,flows,triggers,...}`.
+3. Decide:
+   - **Ambiguous** → post `[AI-AUTO-AGENT:QUESTIONS]` ADF comment, add label `ai-questions`. Stop.
+   - **Clear** → spawn `techlead` agent, post `[AI-AUTO-AGENT:PLAN]`, add `ai-plan-posted`. Stop.
 
 ### REPLIES_RECEIVED
-
-1. Remove topic `ai-questions`.
-2. Read the human reply bodies from the Chatter feed.
-3. Spawn an Agent (`techlead` subagent) with description + replies + code context.
-4. Post the `[AI-AUTO-AGENT:PLAN]` Chatter comment (template below).
-5. Add topic `ai-plan-posted`. **Stop.**
-
-Plan template (plain text):
-```
-[AI-AUTO-AGENT:PLAN]
-
-## Implementation Plan
-
-### Summary
-{summary}
-
-### Task Breakdown
-{tasks from techlead}
-
-### Files to Modify
-- {file paths}
-
----
-Reply "approved" to proceed with implementation. Reply with feedback to revise.
-```
+1. Remove `ai-questions`.
+2. Read human reply comments.
+3. Spawn `techlead` with description + replies + code context.
+4. Post `[AI-AUTO-AGENT:PLAN]`, add `ai-plan-posted`. Stop.
 
 ### PLAN_POSTED
-
-- Human approval → treat as **APPROVED**, fall through.
-- Human feedback (non-approval) → re-plan, post a revised `[AI-AUTO-AGENT:PLAN]`. Keep `ai-plan-posted`.
-- No human reply → skip.
+- Approval → fall through to APPROVED.
+- Feedback → re-plan, post revised `[AI-AUTO-AGENT:PLAN]`, keep `ai-plan-posted`.
+- No reply → skip.
 
 ### APPROVED
+1. Remove `ai-plan-posted`, add `ai-in-progress`.
+2. Spawn implementation session (template below).
+3. Post `[AI-AUTO-AGENT:IN_PROGRESS]` comment with branch + log path.
 
-1. Remove `ai-plan-posted`; add `ai-in-progress`.
-2. Spawn a fire-and-forget implementation session:
+### IN_PROGRESS
+1. `gh pr list --repo "$GITHUB_REPO" --head "$BRANCH" --json number,url,state`.
+2. `tail -20 "$LOG"`.
+3. PR exists → remove `ai-in-progress`, add `ai-implemented`. Transition Jira to "In Review" if available. Post `[AI-AUTO-AGENT:IMPLEMENTED]`.
+4. `ERROR:` in log → remove `ai-in-progress`, add `ai-error`. Post `[AI-AUTO-AGENT:ERROR]` with last 30 log lines.
+5. Still running → skip.
+
+#### Implementation session spawn (Salesforce pipeline)
 
 ```bash
-SLUG=$(echo "$NAME" | tr '[:upper:] ' '[:lower:]-' | tr -cd 'a-z0-9-')
-LOG="$LOG_DIR/$NAME.log"
+SLUG=$(echo "$KEY" | tr '[:upper:]' '[:lower:]')
+LOG="$LOG_DIR/$KEY.log"
 claude --dangerously-skip-permissions \
-  -p "You are the AI Auto Implementer for Salesforce record $NAME ($SF_OBJECT): $SUMMARY.
+  -p "You are the AI Auto Implementer for Jira ticket $KEY: $SUMMARY.
 Working directory: $PROJECT_ROOT
 source \$HOME/.claude/sf-auto-agent.env
 PROJECT_ROOT=$PROJECT_ROOT
 GITHUB_REPO=$GITHUB_REPO
+DEVHUB_ALIAS=$DEVHUB_ALIAS
+SCRATCH_DEF=$SCRATCH_DEF
 BRANCH=$SLUG
 
 ## Plan
 $PLAN
 
 ## Steps
-1. cd $PROJECT_ROOT && git fetch origin && git worktree add .claude/worktrees/$SLUG -b $SLUG origin/main
-2. cd .claude/worktrees/$SLUG && $INSTALL_CMD
-3. Use Agent tool (contract) with the plan → schemas/types
-4. Use Agent tool (backend) → server code
-5. Use Agent tool (frontend) → UI
-6. Use Agent tool (tester) → validate (max 2 retry cycles on critical issues)
-7. git add -A && git commit -m \"$NAME: $SUMMARY\"
-8. git push -u origin \$BRANCH
-9. gh pr create --repo $GITHUB_REPO --title \"$NAME: $SUMMARY\" --body \"\$PLAN\" — capture PR number
-10. Run tester agent for full test report (see Testing & PR Report below).
-11. Post the test report via: gh pr comment \$PR_NUMBER --repo $GITHUB_REPO --body \"\$REPORT\"
-12. cd $PROJECT_ROOT && git worktree remove .claude/worktrees/\$BRANCH
-13. Print: DONE: PR created for $NAME
-On any failure, print ERROR: {details} and STOP (do NOT remove the worktree)." \
+1. cd $PROJECT_ROOT && git fetch origin && git worktree add .claude/worktrees/\$BRANCH -b \$BRANCH origin/$BASE_BRANCH
+2. cd .claude/worktrees/\$BRANCH && $INSTALL_CMD
+3. Create a per-branch scratch org:
+   sf org create scratch --definition-file $SCRATCH_DEF --alias \$BRANCH-scratch --target-dev-hub $DEVHUB_ALIAS --duration-days 7 --set-default
+4. Agent (contract) → metadata (CustomObject/Field XML) + Apex interfaces + LWC public API surface
+5. Agent (backend)  → Apex classes, triggers, Flows
+6. Agent (frontend) → LWC / Aura
+7. Push to scratch: sf project deploy start --source-dir force-app --target-org \$BRANCH-scratch
+8. Agent (tester) → Apex tests + Jest + scratch-org validate. Max 2 retry cycles.
+9. git add -A && git commit -m '$KEY: $SUMMARY'
+10. git push -u origin \$BRANCH
+11. gh pr create --repo $GITHUB_REPO --title '$KEY: $SUMMARY' --body '$PLAN' — capture PR number
+12. sf org delete scratch --target-org \$BRANCH-scratch --no-prompt
+13. cd $PROJECT_ROOT && git worktree remove .claude/worktrees/\$BRANCH
+14. Print: DONE: PR created for $KEY
+On any failure print ERROR and STOP (leave the worktree + scratch org for forensics)." \
   2>&1 | tee "$LOG" &
 ```
-
-After spawning, post a Chatter comment via `sf_post_chatter`:
-```
-[AI-AUTO-AGENT:IN_PROGRESS]
-
-Implementation Started.
-Record: <Name>
-Branch: <slug>
-Logs: .claude/sf-auto-agent-logs/<Name>.log
-Next scheduled run will check for completion.
-```
-
-### IN_PROGRESS
-
-1. Check PR existence: `gh pr list --repo "$GITHUB_REPO" --head "$BRANCH" --json number,url,state`.
-2. Inspect `tail -20 "$LOG"`.
-3. If PR exists → remove `ai-in-progress`, add `ai-implemented`. Update record status if applicable (e.g. `sf_update "$ID" '{"Status":"In Review"}'`). Post `[AI-AUTO-AGENT:IMPLEMENTED]` Chatter with PR URL.
-4. If log shows `ERROR:` → remove `ai-in-progress`, add `ai-error`. Post `[AI-AUTO-AGENT:ERROR]` with last 30 lines of log.
-5. Still running → skip.
 
 ---
 
 ## Step 4 — Test report sweep
 
-Re-query Salesforce for records with topic `ai-implemented` not yet in a "Done"-equivalent status. The status filter is project-specific — express it in `salesforce.activeImplementedFilter` in config, or default to `Status != 'Closed' AND Status != 'In Review'`.
-
 ```bash
-ACTIVE_FILTER=$(jq -r '.salesforce.activeImplementedFilter // "Status != '\''Closed'\'' AND Status != '\''In Review'\''"' "$CFG")
-SWEEP_SOQL="SELECT Id, Name, $SF_SUMMARY_FIELD FROM $SF_OBJECT WHERE Id IN (SELECT EntityId FROM TopicAssignment WHERE Topic.Name = 'ai-implemented') AND $ACTIVE_FILTER"
+SWEEP_JQL=$(jq -r '.jira.activeImplementedJql // ("project=" + .jira.projectKey + " AND labels=\"ai-implemented\" AND status NOT IN (\"Done\", \"In Review\")")' "$CFG")
 ```
 
-Run three sub-phases in order: **4a Test → 4b Fix → 4c Cleanup**. Detection is **SHA-based**, identical to the Jira version: each test report embeds `**Tested commit:** \`<sha7>\`` and is compared to the PR's current `headRefOid`.
+Detection is **SHA-based**: every test report carries `**Tested commit:** \`<sha7>\``, compared to the PR's `headRefOid`.
 
 ### 4a Test Sweep
-
-For each implemented record:
-1. `BRANCH=$(echo "$NAME" | tr '[:upper:] ' '[:lower:]-' | tr -cd 'a-z0-9-')`
-2. `gh pr list --repo "$GITHUB_REPO" --head "$BRANCH" --state all --json number,url,headRefOid,state --limit 1` → capture `PR_NUMBER`, `HEAD_REF_OID`, `STATE`.
-3. Skip unless `STATE == OPEN`.
-4. Pull latest test-report comment body via `gh pr view`. Extract `TESTED_SHA` from `**Tested commit:** \`([a-f0-9]{7})\``.
-5. Debounce: skip if `$LOG_DIR/$NAME-test.log` was modified within the last 30 minutes.
-6. If `REPORT` empty OR `TESTED_SHA != CURRENT_SHA` → spawn **tester agent** (template in "Tester agent spawn" below).
+1. `BRANCH=$(echo "$KEY" | tr '[:upper:]' '[:lower:]')`.
+2. `gh pr list --repo "$GITHUB_REPO" --head "$BRANCH" --state all --json number,url,headRefOid,state --limit 1`. Skip unless `STATE == OPEN`.
+3. Pull latest `## 🧪 Test Report` PR comment. Extract `TESTED_SHA`.
+4. Debounce: skip if `$LOG_DIR/$KEY-test.log` modified within 30 min.
+5. Empty OR `TESTED_SHA != CURRENT_SHA[:7]` → spawn `tester` agent.
 
 ### 4b Fix Sweep
-
-For each implemented record (re-using 4a state):
-1. Skip unless `STATE == OPEN` and a report exists with `TESTED_SHA == CURRENT_SHA`.
-2. Skip if report's overall line starts with `✅`.
-3. Debounce on `$LOG_DIR/$NAME-fix.log` (30 min).
-4. Count `[AI-AUTO-AGENT:FIX-APPLIED]` posts in the Chatter feed:
-   ```bash
-   FIX_COUNT=$(sf_feed "$ID" | jq '[.elements[].body.text // ""] | map(select(test("\\[AI-AUTO-AGENT:FIX-APPLIED\\]"))) | length')
-   ```
-5. If `FIX_COUNT >= 3`: add topic `ai-needs-human`, post `[AI-AUTO-AGENT:FIX-GIVE-UP]`, skip.
-6. Else → spawn **dev-fixer agent**.
+1. Skip unless `STATE == OPEN`, report present, SHA matches.
+2. Skip if overall line starts with `✅`.
+3. Debounce on `$LOG_DIR/$KEY-fix.log`.
+4. Count `[AI-AUTO-AGENT:FIX-APPLIED]` Jira comments. `>= 3` → add `ai-needs-human`, post `[AI-AUTO-AGENT:FIX-GIVE-UP]`, skip.
+5. Else → spawn `dev-fixer` agent.
 
 ### 4c Cleanup Sweep
-
-- If `STATE == MERGED`: `rm -f` for `$LOG_DIR/$NAME.log`, `$NAME-test.log`, `$NAME-fix.log` only. No globs, no recursive deletes.
-- If `STATE` is `OPEN` or `CLOSED`: leave logs (forensics).
+- `MERGED` → `rm -f` exactly `$LOG_DIR/$KEY.log`, `$KEY-test.log`, `$KEY-fix.log`. No globs.
+- `OPEN`/`CLOSED` → leave logs.
 
 ---
 
-## Tester agent spawn (fire-and-forget)
+## Step 5 — Summary log
 
 ```bash
-claude --dangerously-skip-permissions \
-  -p "You are the AI Tester for $NAME, PR #$PR_NUMBER.
-Working directory: $PROJECT_ROOT
-source \$HOME/.claude/sf-auto-agent.env
-
-1. SHA=\$(gh pr view $PR_NUMBER --repo $GITHUB_REPO -q .headRefOid)
-2. cd $PROJECT_ROOT && git fetch origin && git worktree add .claude/worktrees/$BRANCH-test origin/$BRANCH
-3. cd .claude/worktrees/$BRANCH-test && cp $PROJECT_ROOT/.env.local .env.local 2>/dev/null || true
-   node -e 'const fs=require(\"fs\"),p=\".eslintrc.json\";if(fs.existsSync(p)){const j=JSON.parse(fs.readFileSync(p,\"utf8\"));if(!j.root){j.root=true;fs.writeFileSync(p,JSON.stringify(j,null,2));}}'
-   $CI_INSTALL_CMD
-
-4. Static checks — capture exit codes and first 30 lines of stderr on failure:
-   LINT_EXIT=0;  $LINT_CMD  > lint.out  2>&1 || LINT_EXIT=\$?
-   TC_EXIT=0;    $TC_CMD    > tc.out    2>&1 || TC_EXIT=\$?
-   BUILD_EXIT=0; $BUILD_CMD > build.out 2>&1 || BUILD_EXIT=\$?
-
-5. (Optional Playwright E2E — same logic as Jira version: detect playwright.config.*, install chromium, spawn test-planner agent, generate tests/e2e/$BRANCH/, run, commit + push generated tests.)
-
-6. Re-capture SHA *after* any push (critical to avoid re-test loop):
-   SHA_FINAL=\$(git rev-parse HEAD); SHA7=\${SHA_FINAL:0:7}
-
-7. Build report; the 'Tested commit' line is mandatory:
-
-   ## 🧪 Test Report — $NAME
-
-   **Tested commit:** \`\$SHA7\`
-
-   | Check | Status | Details |
-   |-------|--------|---------|
-   | Lint | {✅/❌} | {summary} |
-   | Type Check | {✅/❌} | {summary} |
-   | Build | {✅/❌} | {summary} |
-   | E2E Tests | {✅ N passed / ❌ N failed / ⏭️ Skipped} | {details} |
-
-   ### Overall: {✅ All checks passed OR ❌ N check(s) failed}
-
-   {<details><summary>…</summary>\`\`\`first 30 lines\`\`\`</details> per failure}
-
-8. gh pr comment $PR_NUMBER --repo $GITHUB_REPO --body \"\$REPORT\"
-9. cd $PROJECT_ROOT && git worktree remove .claude/worktrees/$BRANCH-test --force
-10. Print 'DONE: Test report posted for $NAME'." \
-  2>&1 | tee "$LOG_DIR/$NAME-test.log" &
+echo "[$(date -Iseconds)] Run complete. Tickets: $COUNT. Tested: [...]. Fix-spawned: [...]. Cleaned-up: [...]." >> "$LOG_DIR/orchestrator.log"
 ```
 
 ---
 
-## Dev-fixer agent spawn (fire-and-forget)
+## Questions formatting (ADF — single ordered list)
 
-```bash
-claude --dangerously-skip-permissions \
-  -p "You are the AI Dev-Fixer for $NAME, PR #$PR_NUMBER.
-Working directory: $PROJECT_ROOT
-source \$HOME/.claude/sf-auto-agent.env
+ALL questions go in **one** `orderedList` node. Splitting them gives "1. … 1. … 1. …" because Jira restarts numbering per `orderedList`.
 
-1. SHA=\$(gh pr view $PR_NUMBER --repo $GITHUB_REPO -q .headRefOid)
-2. REPORT=\$(gh pr view $PR_NUMBER --repo $GITHUB_REPO --json comments -q '[.comments[] | select(.body | contains(\"## 🧪 Test Report\"))] | last | .body')
-3. PLAN=\$(...fetch latest [AI-AUTO-AGENT:PLAN] post via sf_feed and jq...)
-4. cd $PROJECT_ROOT && git fetch origin && git worktree add .claude/worktrees/$BRANCH-fix origin/$BRANCH
-5. cd .claude/worktrees/$BRANCH-fix && cp $PROJECT_ROOT/.env.local .env.local 2>/dev/null || true && $CI_INSTALL_CMD
-6. Use Agent tool ('dev-fixer'): provide PLAN + REPORT; fix ONLY the reported failures.
-7. Local verification (max 2 iterations of lint+type-check+build). If still failing, ERROR and STOP.
-8. git add -A && git commit -m '$NAME: fix test failures'
-   NEW_SHA=\$(git rev-parse --short HEAD); git push origin $BRANCH
-9. Post Chatter via sf_post_chatter to record id $ID with body:
-   [AI-AUTO-AGENT:FIX-APPLIED]
-   Fix pushed for $NAME (commit \$NEW_SHA). Next orchestrator run will re-test.
-10. cd $PROJECT_ROOT && git worktree remove .claude/worktrees/$BRANCH-fix --force
-11. Print 'DONE: Fix pushed for $NAME'." \
-  2>&1 | tee "$LOG_DIR/$NAME-fix.log" &
+```json
+{"body":{"type":"doc","version":1,"content":[
+  {"type":"paragraph","content":[{"type":"text","text":"[AI-AUTO-AGENT:QUESTIONS]"}]},
+  {"type":"heading","attrs":{"level":2},"content":[{"type":"text","text":"Questions from AI Auto Agent"}]},
+  {"type":"orderedList","content":[
+    {"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","text":"First question"}]}]},
+    {"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","text":"Second question"}]}]}
+  ]},
+  {"type":"paragraph","content":[{"type":"text","text":"---\nPlease reply on this ticket. I will process answers on the next run."}]}
+]}}
 ```
-
----
-
-## Step 5 — Write summary log
-
-```bash
-echo "[$(date -Iseconds)] Run complete. Records: $COUNT. Tested: [...]. Fix-spawned: [...]. Cleaned-up: [...]." >> "$LOG_DIR/orchestrator.log"
-```
-
-Empty lists print as `[]`.
 
 ---
 
 ## Rules
 
-- ALWAYS `source ~/.claude/sf-auto-agent.env` and load the per-project config before any Salesforce or git call.
-- Use `curl` against the Salesforce REST API — do NOT use any MCP Salesforce tool (consistent behavior across machines).
-- NEVER implement records directly — always spawn a separate session.
-- NEVER skip plan approval — always wait for human approval before spawning implementation.
-- ALWAYS add/remove topics at each state transition. Topics are the source of truth.
-- NEVER create a new plan if the record already has `ai-plan-posted`, `ai-in-progress`, or `ai-implemented`.
-- Only ONE `ai-*` topic should be on a record at any time — remove the old one before adding the new.
-- Step 4 is additive — never skip Steps 1–3 to run Step 4, and never skip Step 4 when 1–3 ran.
-- Detection is SHA-based — every test report MUST embed `**Tested commit:** \`<sha7>\``, posted AFTER any tester-pushed commits.
-- Tester + dev-fixer are fire-and-forget; orchestrator never waits.
-- Never delete logs for OPEN/CLOSED PRs in 4c — only MERGED.
-- 3-attempt fix cap is counted by `[AI-AUTO-AGENT:FIX-APPLIED]` posts on the record's Chatter feed.
-- Log everything with timestamps.
-- Be conservative with questions — only ask when genuinely ambiguous.
-- Topics first, Chatter markers second.
+- Source `~/.claude/sf-auto-agent.env` and load the per-project config before any API or `sf` call.
+- Use `curl` for Jira — do NOT use any MCP Atlassian tool.
+- NEVER implement tickets directly — always spawn a separate session.
+- NEVER skip plan approval.
+- ALWAYS add/remove labels at every transition.
+- Only ONE `ai-*` label at a time.
+- Step 4 is additive — never skip 1–3 to run 4, never skip 4 when 1–3 ran.
+- Every report MUST embed `**Tested commit:** \`<sha7>\`` posted AFTER tester-pushed commits.
+- Tester + dev-fixer are fire-and-forget.
+- 4c deletes logs only for MERGED PRs.
+- 3-attempt fix cap counted by Jira `[AI-AUTO-AGENT:FIX-APPLIED]` comments.
+- Scratch orgs are per-branch, torn down on success, left on error.
+- Apex coverage threshold is `$COVERAGE_MIN` (default 75). Coverage below this is a tester failure.
+- Labels first, comments second.
