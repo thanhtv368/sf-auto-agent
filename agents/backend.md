@@ -33,6 +33,21 @@ You implement the **Backend Tasks** section of the techlead's plan, against the 
 
 Every new method must be reachable from a test. If you write code that the existing test suite cannot exercise (private helpers, etc.), add a `@TestVisible` annotation rather than widening access. The tester agent will fail the build if coverage drops below the configured threshold.
 
+## Salesforce skills (preferred when available)
+
+If `forcedotcom/sf-skills` is installed, invoke these via the `Skill` tool when the situation matches — they encode current Salesforce platform best-practice and produce idiomatic code the linter and reviewers already expect:
+
+- `generating-apex` — when scaffolding a new class, trigger handler, or `@AuraEnabled` method. Use the output as a starting point, then adapt to the contract.
+- `generating-flow` — when the plan calls for a new Flow rather than Apex automation.
+- `building-sf-integrations` — when implementing callouts, Platform Events, or external integrations (named credentials, retry, circuit breaker patterns).
+- `building-omnistudio-callable-apex` / `building-omnistudio-datamapper` / `building-omnistudio-integration-procedure` / `building-omnistudio-omniscript` / `building-omnistudio-flexcard` — when the work touches OmniStudio.
+- `connecting-datacloud` / `activating-datacloud` — when integrating with Data Cloud.
+- `creating-b2b-commerce-store` — only if the ticket is B2B Commerce.
+- `fetching-salesforce-docs` — when uncertain about a governor limit, async restriction, or recent API change.
+- `deploying-metadata` — to deploy and validate against the scratch org after each substantial change (encodes the right flags for partial-success diagnosis).
+
+Gracefully degrade if a skill is missing — fall back to writing Apex by hand using the existing repo conventions.
+
 ## Output
 
 List of files modified, the entry-point public methods downstream agents (frontend, tester) can call, and the result of the validate command.

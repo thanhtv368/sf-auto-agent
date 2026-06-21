@@ -44,6 +44,13 @@ Optional but recommended:
 
 - `@salesforce/sfdx-scanner` installed as a plugin (`sf plugins install @salesforce/sfdx-scanner`) for Apex/Aura/LWC linting.
 - `sfdx-lwc-jest` configured in `package.json` for LWC unit tests.
+- **[`forcedotcom/sf-skills`](https://github.com/forcedotcom/sf-skills)** — Salesforce's official curated collection of agent skills. Each of our seven agents will invoke them by name (e.g. `generating-apex`, `generating-lwc-components`, `applying-slds`, `debugging-apex-logs`) when relevant and gracefully degrade if a skill isn't installed. Strongly recommended — install once:
+
+  ```bash
+  npx skills add forcedotcom/sf-skills
+  ```
+
+  The skills auto-update; nothing else to wire up. Browse the catalog at <https://github.com/forcedotcom/sf-skills/tree/main/skills>.
 
 ---
 
@@ -106,6 +113,20 @@ Verify: `/sf-auto-agent` autocompletes, and `Agent(type: "techlead", …)` resol
 | `tester` | After the implementation session opens a PR, and on every `ai-implemented` sweep when the PR head SHA changes | A `## 🧪 Test Report` PR comment with scanner, deploy-validate, Apex test, coverage, and Jest results — pinned to a `**Tested commit:** \`<sha7>\`` line |
 | `test-planner` | Called by tester/dev-fixer when planning new Apex/Jest scenarios | A JSON object of `{apex, jest, utam}` scenarios to add |
 | `dev-fixer` | When the test sweep sees a failing report and the 3-attempt cap isn't hit | A minimal fix commit pushed to the PR branch + `[AI-AUTO-AGENT:FIX-APPLIED]` Jira comment |
+
+### Which sf-skills each agent uses
+
+When `forcedotcom/sf-skills` is installed, agents will invoke these via the `Skill` tool. Missing skills are skipped silently.
+
+| Agent | Salesforce skills it prefers |
+|-------|------------------------------|
+| `techlead` | `fetching-salesforce-docs`, `developing-agentforce`, `building-sf-integrations`, `analyzing-omnistudio-dependencies` |
+| `contract` | `generating-custom-object`, `generating-custom-field`, `generating-permission-set`, `generating-lwc-components`, `generating-flexipage`, `generating-custom-tab`, `generating-list-view`, `generating-lightning-app`, `generating-custom-lightning-type` |
+| `backend` | `generating-apex`, `generating-flow`, `building-sf-integrations`, `deploying-metadata`, `connecting-datacloud`, `activating-datacloud`, the `building-omnistudio-*` family, `creating-b2b-commerce-store`, `fetching-salesforce-docs` |
+| `frontend` | `generating-lwc-components`, `applying-slds`, `applying-cms-brand`, `generating-flexipage`, the `building-ui-bundle-*` and `generating-ui-bundle-*` family, `fetching-salesforce-docs` |
+| `tester` | `configuring-code-analyzer`, `deploying-metadata`, `debugging-apex-logs`, `generating-apex-test` |
+| `test-planner` | `generating-apex-test` |
+| `dev-fixer` | `debugging-apex-logs`, `deploying-metadata`, `configuring-code-analyzer`, `generating-apex-test` |
 
 ### Tuning per project
 

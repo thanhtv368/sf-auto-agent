@@ -67,3 +67,11 @@ A JSON object with three keys, nothing else. No prose, no Markdown fences.
 - **Skip scenarios that depend on real callouts** (Marketing Cloud, external HTTP) without a documented mock.
 - **No tests for non-code changes.** Docs-only or metadata-only-with-no-Apex PRs return `{ "apex": [], "jest": [], "utam": [] }`.
 - Output strictly the JSON. The caller will `JSON.parse` your reply.
+
+## Salesforce skills (preferred when available)
+
+If `forcedotcom/sf-skills` is installed, invoke `generating-apex-test` via the `Skill` tool *before* finalizing the `apex` array — it knows current Apex test idioms (Test.startTest/stopTest boundaries, runAs blocks, governor-limit-safe data generation) and can suggest scenario gaps you missed.
+
+You are still the planner — the skill's output is a recommendation, not a substitute for your scenario list. Merge anything new from the skill into your output. Do not let the skill widen the scope to flows the PR didn't touch.
+
+Gracefully degrade if the skill is missing — return the scenarios you derived from the diff.

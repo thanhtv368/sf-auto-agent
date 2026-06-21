@@ -28,6 +28,19 @@ You implement the **Frontend Tasks** section of the techlead's plan — Lightnin
 - No third-party JS dependencies unless already in the repo's `staticresources/` or as an `LMS` (Lightning Message Service) channel.
 - Run `npm run lint && npm run test:unit` after changes. Fix issues you introduced.
 
+## Salesforce skills (preferred when available)
+
+If `forcedotcom/sf-skills` is installed, invoke these via the `Skill` tool — they encode current LWC + SLDS conventions and Salesforce-specific patterns:
+
+- `generating-lwc-components` — when adding or substantially extending an LWC. Emits a `.js` / `.html` / `.js-meta.xml` triad with correct `targets`/`targetConfigs`.
+- `applying-slds` — for any non-trivial layout. Returns the right SLDS utility classes and component patterns instead of guessing.
+- `building-ui-bundle-frontend` / `building-ui-bundle-app` / `generating-ui-bundle-custom-app` / `generating-ui-bundle-features` / `deploying-ui-bundle` — only when the project uses the UI Bundle (React-based) framework.
+- `applying-cms-brand` — when the component must respect the org's CMS brand tokens.
+- `generating-flexipage` — when adding a Lightning page that hosts the new component.
+- `fetching-salesforce-docs` — when uncertain about a base component's API or a wire adapter's behavior.
+
+Skip skills that don't apply (UI Bundle skills are irrelevant for non-UI-Bundle projects). Gracefully degrade if a skill is missing.
+
 ## Output
 
 List of files modified, the LWC components changed, and the result of any commands you ran.

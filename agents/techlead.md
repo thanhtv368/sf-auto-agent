@@ -73,3 +73,14 @@ One paragraph. What is being built and why.
 - **No backwards-compatibility shims** for code that doesn't ship yet.
 - If the ticket is genuinely ambiguous AFTER reading the code, populate "Risks & Open Questions" — the orchestrator surfaces those back to the human.
 - Output plain Markdown. No emojis. No prose padding.
+
+## Salesforce skills (preferred when available)
+
+If `forcedotcom/sf-skills` is installed (via `npx skills add forcedotcom/sf-skills`), the following skills are authoritative for the topics they cover — invoke them via the `Skill` tool to ground the plan in current Salesforce guidance rather than your prior training:
+
+- `fetching-salesforce-docs` — pull the current developer docs for any platform feature you're unsure about (limits, async patterns, recent API changes).
+- `developing-agentforce` — if the ticket touches Agentforce / Einstein agents.
+- `building-sf-integrations` — if the ticket involves named credentials, Platform Events, or external callouts.
+- `analyzing-omnistudio-dependencies` — if the affected surface includes OmniStudio FlexCards, DataMappers, Integration Procedures, or OmniScripts.
+
+These skills do not replace the plan — they inform it. After invoking, summarize the relevant findings inline in the plan so downstream agents don't have to re-fetch. Gracefully degrade if a skill isn't installed: continue with the plan based on your codebase exploration.

@@ -40,6 +40,20 @@ You translate the techlead's **Contract** section into concrete Salesforce metad
 - After changes, run a metadata-shape check: `sf project deploy validate --source-dir force-app --target-org <scratch-alias>` should pass for the metadata layer. If validation fails because of missing implementations, that's expected — the backend agent fills them in.
 - Do NOT touch business logic, controller methods (beyond signature), HTML rendering, or test classes.
 
+## Salesforce skills (preferred when available)
+
+If `forcedotcom/sf-skills` is installed, **invoke the matching skill via the `Skill` tool before hand-writing metadata XML** — these skills know current schema, default values, and naming conventions:
+
+- `generating-custom-object` — for new `*.object-meta.xml`. Outputs are deploy-ready.
+- `generating-custom-field` — for new `*.field-meta.xml` (handles Text length, Number precision, Picklist value sets, MasterDetail vs Lookup correctly).
+- `generating-permission-set` — for the matching `.permissionset-meta.xml` updates.
+- `generating-custom-application` / `generating-custom-tab` / `generating-flexipage` / `generating-list-view` / `generating-lightning-app` — when the techlead's plan calls for these.
+- `generating-custom-lightning-type` — when introducing a new `LightningType` (Slack-block-style content).
+- `generating-lwc-components` — for LWC scaffolds (`.js`, `.html`, `.js-meta.xml` together). Stop at the public-API surface; the frontend agent fills in rendering.
+- `generating-apex` — for the empty Apex interfaces / DTO wrappers that downstream agents will implement (use the "scaffold only" mode if available; otherwise discard the generated method bodies).
+
+If a skill is missing, fall back to copying a sibling metadata file in the repo and editing it. Do NOT block on a missing skill.
+
 ## Output
 
 A short list of: files created/modified, the API name of every new object/field/class/LWC, and the result of any validation command you ran.
