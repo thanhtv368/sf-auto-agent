@@ -68,15 +68,54 @@ If your org enforces MFA on the API user, the username-password flow is blocked.
 
 ---
 
-## Step 2 — Install the skill
+## Step 2 — Install the skill and the agents
+
+The repo ships **two** things Claude needs:
+
+1. The skill (`SKILL.md`) — orchestrator.
+2. The agents (`agents/*.md`) — the seven roles the orchestrator delegates to.
+
+Install both with one clone + two symlinks:
 
 ```bash
-# Clone next to your other Claude skills.
+# 1. Clone.
 mkdir -p ~/.claude/scheduled-tasks
 git clone https://github.com/thanhtv368/sf-auto-agent.git ~/.claude/scheduled-tasks/sf-auto-agent
+
+# 2. Link the agents into Claude's user-level agent directory so they resolve
+#    by name from anywhere on the machine.
+mkdir -p ~/.claude/agents
+for f in ~/.claude/scheduled-tasks/sf-auto-agent/agents/*.md; do
+  ln -sf "$f" ~/.claude/agents/
+done
 ```
 
-Claude Code discovers any `SKILL.md` under `~/.claude/scheduled-tasks/`. Verify with `/help` or by typing `/sf-auto-agent` — autocompletion should find it.
+Claude Code discovers `SKILL.md` under `~/.claude/scheduled-tasks/` and any agent definition under `~/.claude/agents/`. Verify:
+
+- `/sf-auto-agent` autocompletes.
+- `Agent(type: "techlead", …)` and the other six names resolve.
+
+### The seven agents
+
+| Agent | When the orchestrator calls it | What it produces |
+|-------|--------------------------------|------------------|
+| `techlead` | After REPLIES_RECEIVED or for clear NEW records | Markdown implementation plan with Contract / Backend / Frontend / Test sections |
+| `contract` | First step inside the implementation session | Schemas, types, DB migrations, empty procedure signatures |
+| `backend` | After `contract` | Server-side logic implementing the plan |
+| `frontend` | After `backend` | UI implementing the plan (skipped if no UI) |
+| `tester` | After the implementation session opens a PR, and on every `ai-implemented` sweep when the PR head SHA changes | A `## 🧪 Test Report` PR comment with an embedded `**Tested commit:** \`<sha7>\`` line |
+| `test-planner` | Called by `tester` when Playwright is configured | A JSON array of E2E flows to generate |
+| `dev-fixer` | When the test sweep sees a failing report and the 3-attempt cap isn't hit | A minimal fix commit pushed to the PR branch + `[AI-AUTO-AGENT:FIX-APPLIED]` Chatter post |
+
+### Tuning the agents per-project
+
+The shipped agent prompts are intentionally generic (Node + TypeScript + tRPC-friendly, but not hard-coded). To tune for a specific stack, **override at the project level**: drop a file with the same name into `<project>/.claude/agents/`. Project-level agents shadow user-level ones for that project only.
+
+Common overrides:
+
+- Python project → swap "Zod schemas" for "Pydantic models" in `techlead.md` and `contract.md`.
+- Repo with strict commit hygiene → add the commit message convention to `backend.md` and `dev-fixer.md`.
+- Repo with non-Playwright E2E (Cypress, Vitest browser mode) → rewrite `tester.md`'s step 6.
 
 ---
 
@@ -311,10 +350,23 @@ The record now has `ai-needs-human`. Drop the topic manually after fixing the un
   SKILL.md                                      # the orchestrator
   sf-auto-agent.env.template                    # creds template
   config.template.json                          # per-project config template
+  agents/                                       # the seven sub-agents
+    techlead.md
+    contract.md
+    backend.md
+    frontend.md
+    tester.md
+    dev-fixer.md
+    test-planner.md
   README.md                                     # this file
+~/.claude/agents/                               # symlinks to the seven above
+  techlead.md -> …
+  …
 
 <project>/.claude/
   sf-auto-agent.config.json                     # per-project config (you create this)
+  agents/                                       # OPTIONAL per-project overrides
+    techlead.md                                 # shadows the user-level one
   sf-auto-agent-logs/                           # auto-created
     orchestrator.log                            # one summary line per run
     <RecordName>.log                            # per-record implementation log
